@@ -1,0 +1,7 @@
+# dsh-approval-voice bundle patch: inserts its plugin row into the web plugin roster.
+# The bundle is the official dsh plugin shape — install it with
+# `dsh plugin --profile web add <path-or-git-url>`; the client half (lib/client.js)
+# is picked up automatically from the dsh.client declaration in package.json.
+- insert:
+    - id: approval-voice
+      name: 'dsh-approval-voice'
