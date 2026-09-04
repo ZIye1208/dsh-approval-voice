@@ -17,7 +17,7 @@ DSH Web GUI 插件：当需要你审批或回答的弹窗（沙箱权限升级�
 ## 安装（GitHub）
 
 ```powershell
-dsh plugin --profile web add https://github.com/ZIye1208/dsh-approval-voice
+dsh plugin --profile web add github:ZIye1208/dsh-approval-voice
 ```
 
 安装后**重启 dsh web 服务**，刷新页面即可生效。
