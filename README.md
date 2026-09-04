@@ -14,7 +14,15 @@ DSH Web GUI 插件：当需要你审批或回答的弹窗（沙箱权限升级�
 
 卡片出现时，按配置播放升调提示音（Web Audio，C5-E5-G5）和/或语音播报（SpeechSynthesis，中文语音）。每个请求只提醒一次。
 
-## 安装（GitHub）
+## 安装
+
+### 方式一：npm（推荐，已发布到 npmjs）
+
+```powershell
+dsh plugin --profile web add dsh-approval-voice
+```
+
+### 方式二：GitHub（备选）
 
 ```powershell
 dsh plugin --profile web add github:ZIye1208/dsh-approval-voice
