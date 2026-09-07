@@ -1,6 +1,6 @@
 {
   "name": "dsh-approval-voice",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "DSH Web GUI 审批语音提示：需要审批/回答的弹窗出现时，播放提示音并用语音播报，避免漏看",
   "type": "module",
   "main": "lib/index.js",
@@ -37,6 +37,7 @@
     "lib",
     "cordis.patch.yml",
     "README.md",
+    "CHANGELOG.md",
     "LICENSE"
   ],
   "publishConfig": {
