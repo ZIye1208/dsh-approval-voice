@@ -2,6 +2,33 @@
 
 本文件记录 `dsh-approval-voice` 的重要变更。版本号遵循语义化版本（SemVer）。
 
+## [0.2.2] - 2026-09-30
+
+### 修复
+
+- **桌面端（dsh-desktop 0.2.0-rc.2）的「所有会话」全局提醒恢复生效**。
+  0.2.1 订阅的全局源是**网页版**核心的 `ctx.uiSession.pendingInteractions`，而桌面端客户端核心
+  **没有这个属性**——它只有 `ctx.uiSession.sessionStatus`
+  （`Map<sessionId, {running, pendingInteraction, completionUnread}>`，待处理交互藏在
+  `pendingInteraction` 字段，桌面端侧边栏「等待审批」用的就是它）。于是 `startGlobalWatcher`
+  取源失败 → 退回 DOM 卡片监听 → **只有「当前正在显示的会话」会响**，现象与 0.2.1 修复前一模一样
+  （诊断依据：桌面端 localStorage 里的响铃记录 eventKey 全是 `${tabId}:…` 前缀，
+  而网页版那次是 `session:${sessionId}:…` 前缀）。
+  - 新增 `resolveGlobalSource()`：优先 `uiSession.pendingInteractions`（网页版 dsh 0.1.5-rc.3），
+    否则把 `uiSession.sessionStatus` 适配成同形状（桌面端 dsh-desktop 0.2.0-rc.2）；
+    两者都取不到才退回 DOM 监听并打印明确告警。
+  - `window.__approvalVoice.pending()` 同样走该解析，桌面端也能列出所有会话的待处理交互。
+- **会话作用域 eventKey 在桌面端生效**：桌面端 `sessions.list.getSnapshot()` 返回
+  `{byId, phase}`，没有网页版的 `.current`，导致 `currentSessionId()` 一直取不到值、
+  eventKey 退化成 `${tabId}:${kind}:${key}`（跨标签页去重被架空）。现在会回退到
+  `uiSession.adapter.current.getSnapshot().key`。
+
+### 测试
+
+- `test-global-scope.mjs` 新增 3 组「桌面端核心形状」场景：非当前会话提醒 + 会话作用域 eventKey、
+  仅当前会话模式（验证 adapter.current 回退）、DOM 兜底路径的 eventKey 作用域；
+  断言总数 17 → **27 条，全部通过**（`test-cross-tab.mjs` 5 组也仍全过）。
+
 ## [0.2.1] - 2026-09
 
 ### 修复
@@ -66,4 +93,5 @@
 - 新增跨标签页协调回归测试 `test-cross-tab.mjs`（仅随源码仓库分发，不随 npm 包发布），覆盖：聚焦标签页触发、后台触发 + 前台聚焦、全后台兜底、重复检测去重、仅当前会话不跨页共 5 个场景。
 - 已通过 `node --check` 语法校验与上述协调逻辑测试。
 
+[0.2.2]: https://github.com/ZIye1208/dsh-approval-voice/releases/tag/v0.2.2
 [0.2.0]: https://github.com/ZIye1208/dsh-approval-voice/releases/tag/v0.2.0

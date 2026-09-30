@@ -7,11 +7,15 @@ DSH Web GUI 插件：当需要你审批或回答的弹窗（沙箱权限升级�
 插件有两条检测路径，两条路径统一使用**会话作用域**的事件标识
 （`session:<sessionId>:<kind>:<key>`），因此不会重复提醒：
 
-1. **全局待处理交互源（首选）**：订阅 DSH 客户端的
-   `ctx.uiSession.pendingInteractions`（即侧边栏「等待审批」状态所用的 root hook
-   `sessionPendingInteraction`），按 `Map<sessionId, {kind, key}>` 快照感知**所有会话**的
-   approval / question / plan-review —— 包括**没有开在任何标签页里**的会话。
-2. **DOM 标记（兜底）**：仅在取不到上述源时（更老的 DSH）才使用，监听当前视图渲染出来的卡片：
+1. **全局待处理交互源（首选）**：订阅 DSH 客户端的全局待处理交互快照，按
+   `Map<sessionId, {kind, key}>` 感知**所有会话**的 approval / question / plan-review ——
+   包括**没有开在任何标签页里**的会话。两种客户端核心形状都支持（`resolveGlobalSource()` 自动适配）：
+   - **网页版 dsh 0.1.5-rc.3**：`ctx.uiSession.pendingInteractions`
+     （即侧边栏「等待审批」所用的 root hook `sessionPendingInteraction`）；
+   - **桌面端 dsh-desktop 0.2.0-rc.2**：没有 `pendingInteractions`，改用
+     `ctx.uiSession.sessionStatus`（`Map<sessionId, {running, pendingInteraction, completionUnread}>`，
+     取其中的 `pendingInteraction`），这正是桌面端侧边栏「等待审批」用的源。
+2. **DOM 标记（兜底）**：仅在两个源都取不到时（更老的 DSH）才使用，监听当前视图渲染出来的卡片：
 
 | 标记 | 对应界面 |
 | --- | --- |
@@ -62,9 +66,9 @@ dsh plugin --profile web add link:C:\path\to\dsh-approval-voice
 
 DSH Web GUI 里每个会话可能是一个独立标签页，也可能只是同一页签侧边栏里的一条。插件按以下方式让**任一**会话的审批都能被听到：
 
-- 每个页签订阅 DSH 客户端的**全局**待处理交互源 `ctx.uiSession.pendingInteractions`，因此
-  任何会话（哪怕没开在任何页签里、只在侧边栏显示「等待审批」）出现审批 / 提问 / 计划审批时，
-  每个页签都会感知到；取不到该源时退回监听本页 DOM 里的卡片。
+- 每个页签订阅 DSH 客户端的**全局**待处理交互源（网页版 `ctx.uiSession.pendingInteractions`、
+  桌面端 `ctx.uiSession.sessionStatus`），因此任何会话（哪怕没开在任何页签里、只在侧边栏显示
+  「等待审批」）出现审批 / 提问 / 计划审批时，每个页签都会感知到；两个源都取不到时才退回监听本页 DOM 里的卡片。
 - 事件标识是**会话作用域**的（`session:<sessionId>:<kind>:<key>`），配合 `BroadcastChannel`
   （并写入 localStorage 作为兜底）在全浏览器内**一次提醒只响一次**：优先由**当前聚焦的标签页**
   播放（声音最可靠），若没有任何聚焦标签页，则由最先到时的后台标签页兜底播放。

@@ -89,7 +89,10 @@ function makeCard(attrs) {
 }
 
 // ---------------- 单个「标签页」环境 ----------------
-function makeTab(name, { focused, audioUnlocked, mediaBlocked, uiSessionAvailable, sessionId, shared, pending, waits }) {
+// core: "web"（dsh 0.1.5-rc.3 形状：pendingInteractions + sessions.list.getSnapshot().current）
+//       | "desktop"（dsh-desktop 0.2.0-rc.2 形状：只有 sessionStatus，快照没有 current，
+//                    当前会话在 uiSession.adapter.current）
+function makeTab(name, { focused, audioUnlocked, mediaBlocked, core = "web", uiSessionAvailable, sessionId, shared, pending, waits }) {
 	const env = {
 		played: 0,        // <audio>.play() 真正起播次数
 		playCalls: 0,
@@ -202,12 +205,32 @@ function makeTab(name, { focused, audioUnlocked, mediaBlocked, uiSessionAvailabl
 	);
 	const mod = factory(() => ({ createElement: () => null }));
 
+	// 桌面端形状的 sessionStatus：Map<sessionId, {running, pendingInteraction, completionUnread}>
+	const statusSource = {
+		getSnapshot: () => {
+			const out = new Map();
+			const base = pending && pending.getSnapshot ? pending.getSnapshot() : new Map();
+			base.forEach((interaction, id) => out.set(id, { running: undefined, pendingInteraction: interaction, completionUnread: false }));
+			return out;
+		},
+		subscribe: (fn) => (pending && pending.subscribe ? pending.subscribe(fn) : () => {})
+	};
 	const ctx = {
 		effect(fn) { const dispose = fn(); waits.push(dispose); },
 		locale: { register: () => () => {} },
 		slots: { inject: (_n, cb) => { cb(); }, register: () => () => {} },
-		uiSession: uiSessionAvailable ? { pendingInteractions: pending } : undefined,
-		sessions: { list: { getSnapshot: () => ({ current: tab.currentSessionId }) } }
+		uiSession: !uiSessionAvailable
+			? undefined
+			: core === "desktop"
+				? { sessionStatus: statusSource, adapter: { current: { getSnapshot: () => ({ key: tab.currentSessionId }) } } }
+				: { pendingInteractions: pending },
+		sessions: {
+			list: {
+				getSnapshot: () => (core === "desktop"
+					? { byId: {}, phase: "ready" } // 桌面端快照没有 current
+					: { current: tab.currentSessionId })
+			}
+		}
 	};
 	mod.apply(ctx);
 	tab.module = mod;
@@ -338,6 +361,69 @@ const CONFIG = JSON.stringify({
 	A.addCard({ "data-approval-key": "approval:3" }); // 同一张卡片被重复扫描
 	await wait(600);
 	assert(A.sounds() === 1, "同一卡片重复扫描只响一次");
+}
+
+// ===============================================================
+// 场景 7（0.2.2 核心回归）：桌面端核心形状 dsh-desktop 0.2.0-rc.2
+//   只有 ctx.uiSession.sessionStatus（没有 pendingInteractions），会话快照没有 current
+// ===============================================================
+{
+	const shared = makeSharedStorage();
+	shared.seed("dsh.approvalVoice.v1", CONFIG);
+	const pending = makePendingSource();
+	const waits = [];
+	const A = makeTab("A", { focused: true, audioUnlocked: true, mediaBlocked: false, core: "desktop", uiSessionAvailable: true, sessionId: "session-cur", shared, pending, waits });
+	assert(A.module ? true : false, "桌面端形状：插件在页签 A 激活");
+	assert(A.env.warnings.every((w) => !w.includes("取不到")), "桌面端形状：挂上了 sessionStatus 全局源（修复前会退回 DOM 监听）");
+	pending.publish("session-bg", { kind: "approval", key: "approval:5", sessionId: "session-bg" });
+	await wait(600);
+	assert(A.sounds() === 1, `桌面端形状：非当前会话的审批也响 1 次（实际 ${A.sounds()}；修复前为 0）`);
+	const claim = shared.raw("dsh.approvalVoice.bell.v1") || "";
+	assert(claim.includes("session:session-bg:approval:approval:5"), "桌面端形状：eventKey 是会话作用域（修复前是 tabId 前缀）");
+	reset([A]);
+	pending.publish("session-bg2", { kind: "question", key: "question:1" });
+	await wait(600);
+	assert(A.sounds() === 1, "桌面端形状：另一个后台会话的提问同样会响");
+	reset([A]);
+	pending.settle("session-bg");
+	pending.settle("session-bg2");
+	pending.publish("session-cur", { kind: "approval", key: "approval:2" });
+	await wait(600);
+	assert(A.sounds() === 1, "桌面端形状：当前会话的审批照旧会响");
+}
+
+// ===============================================================
+// 场景 8：桌面端形状 + 提醒范围「仅当前会话」→ 当前会话 id 要能从 adapter.current 取到
+// ===============================================================
+{
+	const shared = makeSharedStorage();
+	shared.seed("dsh.approvalVoice.v1", JSON.stringify({ ...JSON.parse(CONFIG), scope: "current" }));
+	const pending = makePendingSource();
+	const waits = [];
+	const A = makeTab("A", { focused: true, audioUnlocked: true, mediaBlocked: false, core: "desktop", uiSessionAvailable: true, sessionId: "session-cur", shared, pending, waits });
+	pending.publish("session-other", { kind: "approval", key: "approval:1" });
+	await wait(600);
+	assert(A.sounds() === 0, "桌面端形状 + 仅当前会话：其它会话的审批不响");
+	pending.publish("session-cur", { kind: "approval", key: "approval:3" });
+	await wait(600);
+	assert(A.sounds() === 1, "桌面端形状 + 仅当前会话：本页显示的会话照旧响");
+}
+
+// ===============================================================
+// 场景 9：桌面端形状下 DOM 兜底路径的 eventKey 也要会话作用域
+//   （修复前 currentSessionId() 取不到，退化成 tabId，跨标签去重被架空）
+// ===============================================================
+{
+	const shared = makeSharedStorage();
+	shared.seed("dsh.approvalVoice.v1", CONFIG);
+	const pending = makePendingSource();
+	const waits = [];
+	const A = makeTab("A", { focused: true, audioUnlocked: true, mediaBlocked: false, core: "desktop", uiSessionAvailable: true, sessionId: "session-cur", shared, pending, waits });
+	A.addCard({ "data-approval-key": "approval:8" });
+	await wait(600);
+	assert(A.sounds() === 1, "桌面端形状：DOM 兜底卡片照旧触发提醒");
+	const claim = shared.raw("dsh.approvalVoice.bell.v1") || "";
+	assert(claim.includes("session:session-cur:approval:approval:8"), `桌面端形状：DOM 路径 eventKey 带会话作用域（实际 ${claim.slice(0, 90)}）`);
 }
 
 console.log("\n" + (failures === 0 ? "ALL PASSED" : `${failures} FAILED`));
