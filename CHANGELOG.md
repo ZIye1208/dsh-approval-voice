@@ -2,6 +2,51 @@
 
 本文件记录 `dsh-approval-voice` 的重要变更。版本号遵循语义化版本（SemVer）。
 
+## [0.3.0] - 2026-10-04
+
+### 修复
+
+- **自定义提示音会静默丢失（本次的核心 bug）**。三个原因叠在一起，只堵一个修不干净：
+  1. 上限设在 **4MB（二进制）**，但 `FileReader.readAsDataURL` 产出的是 base64，
+     **膨胀约 1.33 倍 → ≈5.33M 字符**，正好压在 localStorage 常见的 5MB 配额线上；
+  2. `setConfig` 里是 `try { setItem } catch { /* ignore */ }` —— 配额异常被**静默吞掉**；
+  3. 面板读的是**内存里的 `config`**，所以选完文件立刻显示「已自定义」，
+     刷新后提示音消失，全程零提示。
+  - 上限降到 **2MB**（留足余量），二进制超限时面板直接报错；
+  - 新增 `writeVerified()`：写入后**回读比对**（有些环境 `setItem` 不抛错却没真正落盘），
+    失败时**回滚内存配置**、还原磁盘上的提示音、把原因写进 `console.warn`；
+  - 面板新增红色错误行，并区分「配额不足」与「其它失败」两种文案；
+  - `window.__approvalVoice.set()` 的返回值由 `config` 改为 `{ ok, error, config }` ——
+    **`ok:false` 表示没存住**，调用方不该忽略它。
+- **拖动音量滑块会卡**：提示音和音量存在同一个 key（`dsh.approvalVoice.v1`）里，
+  而 `<input type="range" step={0.05}>` 的 `onChange` 在拖动时**每步都触发** →
+  每次都 `JSON.stringify` 整个含几 MB base64 的配置再**同步**写 localStorage。
+  - 提示音拆到独立 key `dsh.approvalVoice.sound.v1`，主配置回到 **<1KB**
+    （实测迁移后同源占用 207 字符），滑块拖动不再有 MB 级同步写。
+  - 老版本的数据在首次启动时**自动迁移**（`migrateSoundOut()`）。迁移任一步失败就整体放弃、
+    旧数据原样留着下次再试；读取侧（`readSound()`）也会回退读老位置，
+    所以**已选的提示音不会因为迁移而凭空消失**。
+- **已提醒键表无界增长**：`alertedKeys` 只在 `bell-failed` 分支才 `delete`，
+  长时间开着的标签页里每个新审批事件都永久驻留。改为 FIFO 上限 1000 条
+  （`markAlerted()`）—— 既不会被同一事件重复打扰，也不会一路涨到几十万条。
+- **`localStorage.clear()` 后本页不归位**：`onStorage` 不处理 `event.key === null`，
+  本页会继续抱着一份已经不在磁盘上的配置。现在 `key === null` 与 `key === STORAGE_KEY`
+  走同一条重置路径。
+- 顺带修正两处：`CLAIM_TTL` 的注释写「秒级去重窗口」，实际单位是**毫秒**；
+  新增 `SOUND_KEY` 的 storage 监听，跨标签页改/清提示音时其它页签也会跟上。
+
+### 测试
+
+- `test-global-scope.mjs` 断言总数 **27 → 45 条，全部通过**。
+  - 共享 localStorage 支持模拟配额（`sizeLimit`，超限抛 `QuotaExceededError`）与 `clear()`。
+  - 新增 4 组场景：老数据迁移与新 key 拆分、**配额不足时不许假装保存成功**
+    （回滚 + 磁盘不留半套数据 + 打印原因；同时验证配额充足时确实落盘）、
+    已提醒键表被上限夹住、`storage.clear()` 后回到出厂默认。
+  - 新增调试接口 `alertedCount()` / `soundBytes()` 供断言与排障用。
+- **A/B 对照**：用同一份新测试跑**旧版** `lib/client.js`（`git show HEAD:...`）会 **12 条 FAIL**，
+  跑新版 45 条全过 —— 证明这些断言确实咬得住上面三个 bug，不是摆设。
+- `test-cross-tab.mjs` 7 条断言仍全过。
+
 ## [0.2.2] - 2026-09-30
 
 ### 修复

@@ -4,7 +4,12 @@
 //   3) 「仅当前会话」模式只为本页显示的会话响；
 //   4) 自定义提示音播放失败时自动回退内置提示音（不再静默）；
 //   5) 本页彻底出不了声时让出 claim，请已解锁音频的页签补响一次；
-//   6) uiSession 不可用时退回 DOM 卡片监听，且与全局源不会重复响。
+//   6) uiSession 不可用时退回 DOM 卡片监听，且与全局源不会重复响；
+//   7) 桌面端核心形状（只有 sessionStatus）下同样成立（0.2.2 起）；
+//   8) 提示音与主配置分家 + 老数据自动迁移（0.3.0 起）；
+//   9) 配额不足时**不许假装保存成功**：回滚内存配置 + 磁盘不留半套数据 + 打印失败原因（0.3.0 起）；
+//  10) 已提醒键表有 FIFO 上限，不随运行时长无界增长（0.3.0 起）；
+//  11) localStorage.clear() 后本页回到出厂默认（0.3.0 起）。
 // 运行：node test-global-scope.mjs
 import fs from "node:fs";
 
@@ -18,9 +23,13 @@ new Function("window", SRC)({
 if (factorySrc === null) throw new Error("无法从 lib/client.js 里取出 factory");
 
 // ---------------- 共享 localStorage（同源所有标签页共享） ----------------
-function makeSharedStorage() {
+// options.sizeLimit：模拟配额上限（按 UTF-16 字符数近似），超了就像浏览器那样抛
+// QuotaExceededError —— 这是 0.2.2 里"提示音看着存住了、刷新后消失"的成因，必须能复现。
+function makeSharedStorage(options) {
+	const limit = options && typeof options.sizeLimit === "number" ? options.sizeLimit : Infinity;
 	const data = new Map();
 	const listeners = new Set();
+	function used() { let n = 0; for (const [k, v] of data) n += k.length + v.length; return n; }
 	function notify(source, key, newValue, oldValue) {
 		for (const l of [...listeners]) {
 			if (l.name === source) continue; // storage 事件不投给写入者自己
@@ -30,12 +39,24 @@ function makeSharedStorage() {
 	return {
 		seed(key, value) { data.set(key, String(value)); },
 		raw(key) { return data.get(key); },
+		used,
+		/** 模拟 localStorage.clear()：只发一个 key === null 的事件（真实浏览器就是这个行为）。 */
+		clear() { data.clear(); notify(null, null, null, null); },
 		storageFor(name) {
 			return {
 				getItem: (k) => (data.has(k) ? data.get(k) : null),
 				setItem: (k, v) => {
 					const value = String(v);
 					const old = data.has(k) ? data.get(k) : null;
+					if (limit !== Infinity) {
+						const projected = used() - (old === null ? 0 : k.length + old.length) + k.length + value.length;
+						if (projected > limit) {
+							const error = new Error("Failed to execute 'setItem' on 'Storage': exceeded the quota.");
+							error.name = "QuotaExceededError";
+							error.code = 22;
+							throw error;
+						}
+					}
 					data.set(k, value);
 					if (old !== value) notify(name, k, value, old);
 				},
@@ -186,7 +207,7 @@ function makeTab(name, { focused, audioUnlocked, mediaBlocked, core = "web", uiS
 		disconnect() { this.observing = false; }
 	};
 
-	const tab = { name, env, cards, observers, spoken, storage, pending };
+	const tab = { name, env, cards, observers, spoken, storage, pending, window: windowStub };
 	tab.currentSessionId = sessionId;
 	tab.setCurrentSession = (id) => { tab.currentSessionId = id; };
 
@@ -424,6 +445,88 @@ const CONFIG = JSON.stringify({
 	assert(A.sounds() === 1, "桌面端形状：DOM 兜底卡片照旧触发提醒");
 	const claim = shared.raw("dsh.approvalVoice.bell.v1") || "";
 	assert(claim.includes("session:session-cur:approval:approval:8"), `桌面端形状：DOM 路径 eventKey 带会话作用域（实际 ${claim.slice(0, 90)}）`);
+}
+
+// ===============================================================
+// 场景 10（0.3.0 新增）：提示音与主配置分家 —— 老数据自动迁移，主配置不再被大字符串拖累
+//   0.2.2 及以前把提示音和别的配置挤在同一个 key 里，音量滑块每次 onChange 都要
+//   重写整份含 base64 的配置（同步、主线程）→ 拖一下就卡。
+// ===============================================================
+{
+	const shared = makeSharedStorage();
+	shared.seed("dsh.approvalVoice.v1", CONFIG); // 老格式：提示音就在主配置里
+	const waits = [];
+	const A = makeTab("A", { focused: true, audioUnlocked: true, mediaBlocked: false, uiSessionAvailable: true, sessionId: "s-a", shared, pending: makePendingSource(), waits });
+	const api = A.window.__approvalVoice;
+	assert(shared.raw("dsh.approvalVoice.sound.v1") !== undefined, "老格式里的提示音被迁移到独立 key");
+	assert(!String(shared.raw("dsh.approvalVoice.v1")).includes("sound"), "迁移后主配置里不再残留提示音（主配置回到 <1KB）");
+	assert(api.get().sound !== "", "迁移后提示音照旧可用（没丢用户已选的音）");
+	assert(api.get().volume === 0.75, "迁移不影响其它配置项（CONFIG 里 volume=0.75）");
+	assert(shared.used() < 2000, `分家后 localStorage 占用很小（实际 ${shared.used()} 字符）`);
+}
+
+// ===============================================================
+// 场景 11（0.3.0 核心回归）：配额不足时**不许假装保存成功**
+//   修复前：setItem 抛 QuotaExceededError 被 catch{} 吞掉，面板照样显示「已自定义」，
+//   刷新后提示音消失，全程零提示。这是本次要根治的 bug。
+// ===============================================================
+{
+	const shared = makeSharedStorage({ sizeLimit: 500 }); // 配额只够存一份主配置，存不下提示音
+	const waits = [];
+	const A = makeTab("A", { focused: true, audioUnlocked: true, mediaBlocked: false, uiSessionAvailable: true, sessionId: "s-a", shared, pending: makePendingSource(), waits });
+	const api = A.window.__approvalVoice;
+	const before = api.get();
+	const huge = "data:audio/wav;base64," + "A".repeat(4000); // 远超 500 字符配额
+	const result = api.set({ sound: huge });
+	assert(result && result.ok === false, "配额不足时 set() 明确报告失败（不再静默吞掉）");
+	assert(result.error && result.error.name === "QuotaExceededError", "失败原因是 QuotaExceededError（面板能识别成「配额」而不是「未知错误」）");
+	assert(api.get().sound === before.sound, "保存失败后内存配置回滚到上一个值（面板不会显示「已自定义」）");
+	assert(shared.raw("dsh.approvalVoice.sound.v1") === undefined, "保存失败时磁盘上没留下半套新数据");
+	assert(A.env.warnings.some((w) => w.includes("设置保存失败")), "失败原因写进了 console.warn（不再静默吞掉）");
+	// 反过来：配额够的时候必须真的存住，别矫枉过正
+	const okResult = api.set({ sound: "data:audio/wav;base64,QUJD" });
+	assert(okResult && okResult.ok === true, "配额充足时 set() 报告成功");
+	assert(api.get().sound === "data:audio/wav;base64,QUJD", "成功路径确实写进了内存配置");
+	assert(shared.raw("dsh.approvalVoice.sound.v1") === "data:audio/wav;base64,QUJD", "成功路径确实落到了磁盘");
+}
+
+// ===============================================================
+// 场景 12（0.3.0 新增）：已提醒键表有 FIFO 上限，不随运行时长无界增长
+// ===============================================================
+{
+	const shared = makeSharedStorage();
+	shared.seed("dsh.approvalVoice.v1", CONFIG);
+	const pending = makePendingSource();
+	const waits = [];
+	const A = makeTab("A", { focused: true, audioUnlocked: true, mediaBlocked: false, uiSessionAvailable: true, sessionId: "s-a", shared, pending, waits });
+	const api = A.window.__approvalVoice;
+	// 一次性灌入 1500 个不同的待处理交互（真实场景是长期累积出来的）
+	const snapshot = pending.getSnapshot();
+	for (let i = 0; i < 1500; i++) snapshot.set("s-bg-" + i, { kind: "approval", key: "approval:" + i });
+	pending.publish("s-trigger", { kind: "approval", key: "approval:t" }); // 触发一轮 flush
+	await wait(500);
+	// 用存在性判断而不是直接调用：老版本没有这个调试方法，应当"FAIL 掉"而不是把整套测试崩掉，
+	// 否则它后面的场景根本没机会跑，诊断价值大打折扣。
+	const count = typeof api.alertedCount === "function" ? api.alertedCount() : -1;
+	assert(count === 1000, `已提醒键表被上限夹住、没有无界增长（实际 ${count}）`);
+}
+
+// ===============================================================
+// 场景 13（0.3.0 新增）：localStorage.clear() → 本页回到出厂默认
+//   修复前 onStorage 不处理 key === null，本页会继续抱着一份已不在磁盘上的配置。
+// ===============================================================
+{
+	const shared = makeSharedStorage();
+	shared.seed("dsh.approvalVoice.v1", JSON.stringify({ ...JSON.parse(CONFIG), volume: 0.2, scope: "current" }));
+	const waits = [];
+	const A = makeTab("A", { focused: true, audioUnlocked: true, mediaBlocked: false, uiSessionAvailable: true, sessionId: "s-a", shared, pending: makePendingSource(), waits });
+	const api = A.window.__approvalVoice;
+	assert(api.get().volume === 0.2 && api.get().scope === "current", "（前置）自定义配置已生效");
+	shared.clear();
+	await wait(100);
+	assert(api.get().volume === 0.6, "storage.clear() 后音量回到默认（不再抱着失效配置）");
+	assert(api.get().scope === "all", "storage.clear() 后提醒范围回到默认");
+	assert(api.get().sound === "", "storage.clear() 后自定义提示音清空");
 }
 
 console.log("\n" + (failures === 0 ? "ALL PASSED" : `${failures} FAILED`));
